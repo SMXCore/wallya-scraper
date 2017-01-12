@@ -1,0 +1,9 @@
+[package]
+name = "wallya-scraper"
+version = "0.1.0"
+authors = ["StelarCF <StelarCF@gmail.com>"]
+
+[dependencies]
+hyper = "*"
+rustc-serialize = "*"
+time = "*"
