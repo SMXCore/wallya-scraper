@@ -7,3 +7,6 @@ authors = ["StelarCF <StelarCF@gmail.com>"]
 hyper = "*"
 rustc-serialize = "*"
 time = "*"
+xmlJSON = "*"
+docopt = "*"
+mqtt3 = "*"
