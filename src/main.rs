@@ -1,13 +1,18 @@
 extern crate hyper;
+extern crate tokio_core;
 extern crate rustc_serialize;
 extern crate time;
+extern crate serde;
+#[macro_use]
+extern crate serde_derive;
 extern crate docopt;
 extern crate xmlJSON;
 extern crate mqtt3;
+extern crate futures;
 use hyper::client::*;
 use rustc_serialize::json::{Json, encode, ToJson};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
@@ -26,49 +31,55 @@ use std::net::TcpStream;
 use std::io::{BufReader, BufWriter};
 use mqtt3::{MqttRead, MqttWrite, Packet, Connect, Publish, Protocol, QoS, PacketIdentifier, Subscribe};
 
+use futures::future::Future;
+use futures::Stream;
+
 const USAGE: &'static str = "
 wallya-scraper
 
 Usage:
-  wallya-scraper [--interval=<s>]
+  wallya-scraper [--interval=<s>] [-f | --full] <address>
   wallya-scraper (-h | --help)
 
 Options:
   -h --help         Show this screen.
   --interval=<s>    Interval between queries and prints. Must be divisible by 2 and must divide 60. [default: 10].
+  -f --full         Use the address as a full address and do not append the default extension (/cgi-bin/wallyabcgi?req=3&lang=en)
 ";
 
-#[derive(Debug, RustcDecodable, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone)]
 struct Args {
 	flag_interval: isize,
+	arg_address: String,
+	flag_full: bool,
 }
 
 fn print_to_file(file: &Arc<Mutex<File>>, string: &str) -> Result<usize, std::io::Error> {
 	file.lock().unwrap().write(string.as_bytes())
 }
 
-fn get(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>) {
+fn get(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, address: String) {
 	let now = time::now();
-	let client = Client::new();
-	let site_transel = "http://pq.teamware.it:5080/cgi-bin/wallyabcgi?req=3&lang=en";
-	let mut res = client.get(site_transel).send().unwrap();
-	assert_eq!(res.status, hyper::Ok);
+	let mut core = tokio_core::reactor::Core::new().unwrap();
+	let handle = core.handle();
+	let client = Client::new(&handle);
+	let mut res = client.get(address.parse::<hyper::Uri>().unwrap()).wait().unwrap();
+	assert_eq!(res.status(), hyper::Ok);
 	let mut buf = Vec::new();
-	let _ = res.read_to_end(&mut buf).unwrap();
-	//let mut json = Json::from_str(&unsafe{String::from_utf8_unchecked(buf)}[..]).unwrap();
-	//println!("{:?}###", buf);
+	let hyper::header::Date(sv_date) = res.headers().get::<hyper::header::Date>().unwrap().clone();
+	core.run(res.body().for_each(|chunk| {
+		for x in chunk {
+			buf.push(x);
+		}
+		futures::future::empty::<(), hyper::Error>()
+	})).unwrap();
+	//let _ = res.read_to_end(&mut buf).unwrap();
 	let doc : XmlDocument = XmlDocument::from_str(&unsafe{String::from_utf8_unchecked(buf)}[..]).unwrap();
-	//println!("{:?}$$$", doc);
-	//println!("{:?}@@@", doc.to_json());
-	//println!("{:?}@@@", doc.to_json().as_object().unwrap());
-	//println!("{:?}@@@", doc.to_json().as_object().unwrap().get("measures").unwrap());
 	let json_ini = doc.to_json().as_object().unwrap().get("measures").unwrap().as_object().unwrap().get("measure").unwrap().clone();//.as_array().unwrap()[0].clone();
 	let mut json = Json::Array(vec![]);
-	//println!("{:?}%%%", json);
 	let array = json_ini.as_array().unwrap().clone();
 	for elem in &array {
 		let obj = elem.as_object().unwrap();
-		//println!("{:?}", obj);
 		let name = if obj.get("unit").unwrap().as_object().unwrap().contains_key("_") {
 			obj.get("$").unwrap().as_object().unwrap().get("name").unwrap().as_string().unwrap().to_string() + " (" + obj.get("unit").unwrap().as_object().unwrap().get("_").unwrap().as_string().unwrap() + ")"
 		} else {
@@ -84,8 +95,15 @@ fn get(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>) {
 	json.as_array_mut().unwrap().push(Json::Object(btm));
 	// În mod implicit, nu primim în json și data la care a răspuns
 	let mut btm = BTreeMap::new();
-	let hyper::header::Date(hyper::header::HttpDate(sv_date)) = res.headers.get::<hyper::header::Date>().unwrap().clone();
-	btm.insert(".SERVER_TIME".to_string(), Json::String(format!("{}", sv_date.strftime("%y/%m/%d %T").unwrap()).to_string()));
+	let systime: SystemTime = sv_date.into();
+	let unix0 = time::Timespec::new(0, 0);
+	let rn = time::now();
+	let dur = rn.to_timespec() - unix0;
+	let unixdur = systime.duration_since(std::time::UNIX_EPOCH).unwrap();
+	let unixdur = time::Duration::from_std(unixdur).unwrap();
+	let timesince = dur - unixdur;
+	let date = rn - timesince;
+	btm.insert(".SERVER_TIME".to_string(), Json::String(format!("{}", date.strftime("%y/%m/%d %T").unwrap()).to_string()));
 	json.as_array_mut().unwrap().push(Json::Object(btm));
 	bufdeposit.lock().unwrap().clone_from(&encode(&json).unwrap());
 	*semaphor.lock().unwrap() = true;
@@ -94,7 +112,6 @@ fn get(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>) {
 fn print(bufdeposit: Arc<Mutex<String>>, file: &Arc<Mutex<File>>, print_header: bool) {
 	let buf = bufdeposit.lock().unwrap().clone();
 	let json = Json::from_str(&buf[..]).unwrap();
-	//println!("{:?}", json);
 	let mut array = json.as_array().unwrap().clone();
 	array.retain(|t| !(t.as_object().unwrap().contains_key(".SERVER_TIME")));
 	array.sort_by_key(|t| t.as_object().unwrap().iter().next().unwrap().0.clone());
@@ -157,7 +174,17 @@ fn get_timer(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, args: A
 	loop {
 		let bufdeposit_clone = bufdeposit.clone();
 		let semaphor_clone = semaphor.clone();
-		thread::spawn(move || get(bufdeposit_clone, semaphor_clone));
+		let addr = if args.flag_full {
+			args.clone().arg_address
+		} else {
+			let addr = args.clone().arg_address;
+			if addr.ends_with("/") {
+				addr + "cgi-bin/wallyabcgi?req=3&lang=en"
+			} else {
+				addr + "/cgi-bin/wallyabcgi?req=3&lang=en"
+			}
+		};
+		thread::spawn(move || get(bufdeposit_clone, semaphor_clone, addr));
 		let now = time::now();
 		let sec_sleep = args.flag_interval as u64 - ((now.tm_sec + args.flag_interval as i32 / 2) % args.flag_interval as i32) as u64;
 		if now.tm_nsec < 500_000_000 && now.tm_nsec > 0 {
@@ -176,6 +203,7 @@ fn print_timer(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, args:
 	let mut print_header = !path.exists();
 	let mut file = Arc::new(Mutex::new(OpenOptions::new().write(true).append(true).create(true).open(path).unwrap()));
 	let now = time::now();
+	println!("-");
 	sleep(Duration::new(0, 1000_000_000 - now.tm_nsec as u32));
 	loop {
 		let now = time::now();
@@ -205,10 +233,11 @@ fn print_timer(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, args:
 }
 
 fn main() {
-	let args: Args = Docopt::new(USAGE).and_then(|d| d.decode()).unwrap_or_else(|e| e.exit());
+	let args: Args = Docopt::new(USAGE).and_then(|d| d.deserialize()).unwrap_or_else(|e| e.exit());
 	if args.flag_interval % 2 != 0 || 60 % args.flag_interval != 0 {
 		panic!("Interval not divisible by 2 or not a divisor of 60");
 	}
+	let args_cp = args.clone();
 	let bufdeposit = Arc::new(Mutex::new(String::new()));
 	let bufdeposit_get = bufdeposit.clone();
 	let semaphor = Arc::new(Mutex::new(false));
@@ -216,7 +245,7 @@ fn main() {
 	let get_child = thread::spawn(move || get_timer(bufdeposit_get, semaphor_get, args));
 	let bufdeposit_print = bufdeposit.clone();
 	let semaphor_print = semaphor.clone();
-	let print_child = thread::spawn(move || print_timer(bufdeposit_print, semaphor_print, args));
+	let print_child = thread::spawn(move || print_timer(bufdeposit_print, semaphor_print, args_cp));
 	let _ = get_child.join();
 	let _ = print_child.join();
 }
