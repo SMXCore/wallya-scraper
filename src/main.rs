@@ -28,30 +28,31 @@ use mqtt3::{MqttRead, MqttWrite, Packet, Connect, Publish, Protocol, QoS, Packet
 
 const USAGE: &'static str = "
 wallya-scraper
-
 Usage:
-  wallya-scraper [--interval=<s>]
+  wallya-scraper [--interval=<s>] [-f | --full] <address>
   wallya-scraper (-h | --help)
-
 Options:
   -h --help         Show this screen.
   --interval=<s>    Interval between queries and prints. Must be divisible by 2 and must divide 60. [default: 10].
+  -f --full         Use the address as a full address and do not append the default extension (/cgi-bin/wallyabcgi?req=3&lang=en)
 ";
 
-#[derive(Debug, RustcDecodable, Clone, Copy)]
+#[derive(Debug, RustcDecodable, Clone)]
 struct Args {
 	flag_interval: isize,
+	arg_address: String,
+	flag_full: bool,
 }
 
 fn print_to_file(file: &Arc<Mutex<File>>, string: &str) -> Result<usize, std::io::Error> {
 	file.lock().unwrap().write(string.as_bytes())
 }
 
-fn get(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>) {
+fn get(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, address: String) {
 	let now = time::now();
 	let client = Client::new();
-	let site_transel = "http://pq.teamware.it:5080/cgi-bin/wallyabcgi?req=3&lang=en";
-	let mut res = client.get(site_transel).send().unwrap();
+	let site_transel = address;//"http://pq.teamware.it:5080/cgi-bin/wallyabcgi?req=3&lang=en";
+	let mut res = client.get(site_transel.as_str()).send().unwrap();
 	assert_eq!(res.status, hyper::Ok);
 	let mut buf = Vec::new();
 	let _ = res.read_to_end(&mut buf).unwrap();
@@ -157,7 +158,17 @@ fn get_timer(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, args: A
 	loop {
 		let bufdeposit_clone = bufdeposit.clone();
 		let semaphor_clone = semaphor.clone();
-		thread::spawn(move || get(bufdeposit_clone, semaphor_clone));
+		let addr = if args.flag_full {
+			args.clone().arg_address
+		} else {
+			let addr = args.clone().arg_address;
+			if addr.ends_with("/") {
+				addr + "cgi-bin/wallyabcgi?req=3&lang=en"
+			} else {
+				addr + "/cgi-bin/wallyabcgi?req=3&lang=en"
+			}
+		};
+		thread::spawn(move || get(bufdeposit_clone, semaphor_clone, addr));
 		let now = time::now();
 		let sec_sleep = args.flag_interval as u64 - ((now.tm_sec + args.flag_interval as i32 / 2) % args.flag_interval as i32) as u64;
 		if now.tm_nsec < 500_000_000 && now.tm_nsec > 0 {
@@ -213,7 +224,8 @@ fn main() {
 	let bufdeposit_get = bufdeposit.clone();
 	let semaphor = Arc::new(Mutex::new(false));
 	let semaphor_get = semaphor.clone();
-	let get_child = thread::spawn(move || get_timer(bufdeposit_get, semaphor_get, args));
+	let args_cp = args.clone();
+	let get_child = thread::spawn(move || get_timer(bufdeposit_get, semaphor_get, args_cp));
 	let bufdeposit_print = bufdeposit.clone();
 	let semaphor_print = semaphor.clone();
 	let print_child = thread::spawn(move || print_timer(bufdeposit_print, semaphor_print, args));
