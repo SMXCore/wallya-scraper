@@ -44,8 +44,10 @@ struct Args {
 	flag_full: bool,
 }
 
-fn print_to_file(file: &Arc<Mutex<File>>, string: &str) -> Result<usize, std::io::Error> {
-	file.lock().unwrap().write(string.as_bytes())
+fn print_to_file(file: &Arc<Mutex<File>>, string: &str) -> Result<(), std::io::Error> {
+	try!(file.lock().unwrap().write(string.as_bytes()));
+	try!(file.lock().unwrap().flush());
+	Ok(())
 }
 
 fn get(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, address: String) {
