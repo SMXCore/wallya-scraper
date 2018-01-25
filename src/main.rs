@@ -29,7 +29,7 @@ use mqtt3::{MqttRead, MqttWrite, Packet, Connect, Publish, Protocol, QoS, Packet
 const USAGE: &'static str = "
 wallya-scraper
 Usage:
-  wallya-scraper [--interval=<s>] [-f | --full] <address>
+  wallya-scraper [--interval=<s>] [-f | --full] <address> <topic>
   wallya-scraper (-h | --help)
 Options:
   -h --help         Show this screen.
@@ -41,6 +41,7 @@ Options:
 struct Args {
 	flag_interval: isize,
 	arg_address: String,
+	arg_topic: String,
 	flag_full: bool,
 }
 
@@ -53,74 +54,74 @@ fn print_to_file(file: &Arc<Mutex<File>>, string: &str) -> Result<(), std::io::E
 fn get(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, address: String) {
 	let now = time::now();
 	let client = Client::new();
-	let site_transel = address;//"http://pq.teamware.it:5080/cgi-bin/wallyabcgi?req=3&lang=en";
+	let site_transel = address;
 	let mut res = client.get(site_transel.as_str()).send().unwrap();
 	assert_eq!(res.status, hyper::Ok);
 	let mut buf = Vec::new();
 	let _ = res.read_to_end(&mut buf).unwrap();
-	//let mut json = Json::from_str(&unsafe{String::from_utf8_unchecked(buf)}[..]).unwrap();
-	//println!("{:?}###", buf);
 	let doc : XmlDocument = XmlDocument::from_str(&unsafe{String::from_utf8_unchecked(buf)}[..]).unwrap();
-	//println!("{:?}$$$", doc);
-	//println!("{:?}@@@", doc.to_json());
-	//println!("{:?}@@@", doc.to_json().as_object().unwrap());
-	//println!("{:?}@@@", doc.to_json().as_object().unwrap().get("measures").unwrap());
 	let json_ini = doc.to_json().as_object().unwrap().get("measures").unwrap().as_object().unwrap().get("measure").unwrap().clone();//.as_array().unwrap()[0].clone();
 	let mut json = Json::Array(vec![]);
-	//println!("{:?}%%%", json);
 	let array = json_ini.as_array().unwrap().clone();
+
+	let mut btmo = BTreeMap::new();
+
 	for elem in &array {
-		let obj = elem.as_object().unwrap();
-		//println!("{:?}", obj);
-		let name = if obj.get("unit").unwrap().as_object().unwrap().contains_key("_") {
-			obj.get("$").unwrap().as_object().unwrap().get("name").unwrap().as_string().unwrap().to_string() + " (" + obj.get("unit").unwrap().as_object().unwrap().get("_").unwrap().as_string().unwrap() + ")"
-		} else {
-			obj.get("$").unwrap().as_object().unwrap().get("name").unwrap().as_string().unwrap().to_string()
-		};
-		let value = obj.get("value").unwrap().as_object().unwrap().get("_").unwrap().as_string().unwrap().to_string();
 		let mut btm = BTreeMap::new();
-		btm.insert(name, Json::String(value));
-		json.as_array_mut().unwrap().push(Json::Object(btm));
+		let obj = elem.as_object().unwrap();
+		let name = obj.get("$").unwrap().as_object().unwrap().get("name").unwrap().as_string().unwrap().to_string();
+		if obj.get("unit").unwrap().as_object().unwrap().contains_key("_") {
+			btm.insert("unit".to_string(), Json::String(obj.get("unit").unwrap().as_object().unwrap().get("_").unwrap().as_string().unwrap().to_string()));
+		}
+		let value = obj.get("value").unwrap().as_object().unwrap().get("_").unwrap().as_string().unwrap().to_string();
+		btm.insert("value".to_string(), Json::String(value));
+		btmo.insert(name, Json::Object(btm));
 	}
-	let mut btm = BTreeMap::new();
-	btm.insert(".REQUEST_TIME".to_string(), Json::String(format!("{}", now.strftime("%y/%m/%d %T").unwrap()).to_string()));
-	json.as_array_mut().unwrap().push(Json::Object(btm));
+//	let mut btm = BTreeMap::new();
+	btmo.insert(".REQUEST_TIME".to_string(), Json::String(format!("{}", now.strftime("%F %T").unwrap()).to_string()));
+//	json.as_array_mut().unwrap().push(Json::Object(btm));
 	// În mod implicit, nu primim în json și data la care a răspuns
-	let mut btm = BTreeMap::new();
+//	let mut btm = BTreeMap::new();
 	let hyper::header::Date(hyper::header::HttpDate(sv_date)) = res.headers.get::<hyper::header::Date>().unwrap().clone();
-	btm.insert(".SERVER_TIME".to_string(), Json::String(format!("{}", sv_date.strftime("%y/%m/%d %T").unwrap()).to_string()));
-	json.as_array_mut().unwrap().push(Json::Object(btm));
-	bufdeposit.lock().unwrap().clone_from(&encode(&json).unwrap());
+	btmo.insert(".SERVER_TIME".to_string(), Json::String(format!("{}", sv_date.strftime("%F %T").unwrap()).to_string()));
+//	json.as_array_mut().unwrap().push(Json::Object(btm));
+	let jso = Json::Object(btmo);
+	bufdeposit.lock().unwrap().clone_from(&encode(&jso).unwrap());
 	*semaphor.lock().unwrap() = true;
 }
 
-fn print(bufdeposit: Arc<Mutex<String>>, file: &Arc<Mutex<File>>, print_header: bool) {
+fn print(bufdeposit: Arc<Mutex<String>>, file: &Arc<Mutex<File>>, print_header: bool, topic: String) {
 	let buf = bufdeposit.lock().unwrap().clone();
 	let json = Json::from_str(&buf[..]).unwrap();
 	//println!("{:?}", json);
-	let mut array = json.as_array().unwrap().clone();
-	array.retain(|t| !(t.as_object().unwrap().contains_key(".SERVER_TIME")));
-	array.sort_by_key(|t| t.as_object().unwrap().iter().next().unwrap().0.clone());
+	let mut obj = json.as_object().unwrap().clone();
+//	array.retain(|t| !(t.as_object().unwrap().contains_key(".SERVER_TIME")));
+//	array.sort_by_key(|t| t.as_object().unwrap().iter().next().unwrap().0.clone());
 	if print_header {
-		print_to_file(file, "COMPUTER_TIME\tSERVER_TIME\tLOG MS").unwrap();
-		for elem in &array {
-			let (name, _) = elem.as_object().unwrap().iter().next().unwrap();
+		print_to_file(file, "COMPUTER_TIME\tLOG MS").unwrap();
+		for (name, _) in &obj {
+//			let (name, _) = elem.as_object().unwrap().iter().next().unwrap();
 			print_to_file(file, &format!("\t{}", name)[..]).unwrap();
 		}
 		print_to_file(file, "\n").unwrap();
 	}
-	let mut array2 = json.as_array().unwrap().clone();
-	array2.retain(|t| t.as_object().unwrap().contains_key(".SERVER_TIME"));
+	let mut obj2 = json.as_object().unwrap().clone();
+//	array2.retain(|t| t.as_object().unwrap().contains_key(".SERVER_TIME"));
 	let now = time::now();
-	print_to_file(file, &format!("{} {:03}\t{}\t{}", now.strftime("%y/%m/%d %T").unwrap(), now.tm_nsec / 1000_000, array2.iter().next().unwrap().as_object().unwrap().iter().next().unwrap().1.as_string().unwrap(), now.tm_nsec / 1000)[..]).unwrap();
-	for elem in &array {
-		let (_, value) = elem.as_object().unwrap().iter().next().unwrap();
+	print_to_file(file, &format!("{} {:03}\t{}", now.strftime("%F %T").unwrap(), now.tm_nsec / 1000_000, now.tm_nsec / 1000)[..]).unwrap();
+	for (_, elem) in &obj2 {
+//		let (_, value) = elem.as_object().unwrap().iter().next().unwrap();
+		let value = if let Some(elemo) = elem.as_object() {
+			elemo.get("value").unwrap()
+		} else {
+			elem
+		};
 		print_to_file(file, &format!("\t{}", value.as_string().unwrap())[..]).unwrap();
 	}
 	print_to_file(file, "\n").unwrap();
 
 	// MQTT
-	println!("-");
+//	println!("-");
 	let stream = TcpStream::connect("127.0.0.1:1883").unwrap();
 	let mut reader = BufReader::new(stream.try_clone().unwrap());
 	let mut writer = BufWriter::new(stream.try_clone().unwrap());
@@ -144,7 +145,7 @@ fn print(bufdeposit: Arc<Mutex<String>>, file: &Arc<Mutex<File>>, print_header: 
 		dup: false,
 		qos: QoS::AtLeastOnce,
 		retain: false,
-		topic_name: "/wallya".to_owned(),
+		topic_name: topic,
 		pid: Some(PacketIdentifier(10)),
 		payload: Arc::new(buf.into_bytes())
 	}));
@@ -183,8 +184,8 @@ fn get_timer(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, args: A
 
 fn print_timer(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, args: Args) {
 	let now = time::now();
-	let mut old_path_str = format!("wallya{}.txt", now.strftime("20%y%m%d").unwrap());
-	let path_str = format!("wallya{}.txt", now.strftime("20%y%m%d").unwrap());
+	let mut old_path_str = format!("wallya{}.txt", now.strftime("%Y%m%d").unwrap());
+	let path_str = format!("wallya{}.txt", now.strftime("%Y%m%d").unwrap());
 	let path = Path::new(&path_str[..]);
 	let mut print_header = !path.exists();
 	let mut file = Arc::new(Mutex::new(OpenOptions::new().write(true).append(true).create(true).open(path).unwrap()));
@@ -192,19 +193,20 @@ fn print_timer(bufdeposit: Arc<Mutex<String>>, semaphor: Arc<Mutex<bool>>, args:
 	sleep(Duration::new(0, 1000_000_000 - now.tm_nsec as u32));
 	loop {
 		let now = time::now();
-		let path_str2 = format!("wallya{}.txt", now.strftime("20%y%m%d").unwrap());
+		let path_str2 = format!("wallya{}.txt", now.strftime("%Y%m%d").unwrap());
 		if path_str2 != old_path_str {
 			file.lock().unwrap().flush().unwrap();
 			print_header = true;
 			old_path_str = path_str2;
-			let path_str = format!("wallya{}.txt", now.strftime("20%y%m%d").unwrap());
+			let path_str = format!("wallya{}.txt", now.strftime("$Y%m%d").unwrap());
 			let path = Path::new(&path_str[..]);
 			file = Arc::new(Mutex::new(OpenOptions::new().write(true).append(true).create(true).open(path).unwrap()));
 		}
 		let filelock2 = file.clone();
 		let bufdeposit_clone = bufdeposit.clone();
+		let arg_topic = args.arg_topic.clone();
 		if *semaphor.lock().unwrap() {
-			thread::spawn(move || print(bufdeposit_clone, &filelock2, print_header));
+			thread::spawn(move || print(bufdeposit_clone, &filelock2, print_header, arg_topic));
 			print_header = false;
 		}
 		let now = time::now();
